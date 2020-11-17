@@ -55,6 +55,7 @@ regionMap = {
 regionIdMap = {v["regionId"]: k for k, v in regionMap.items()}
 
 offers = {}
+jitaOffers = {}
 for region in regionMap:
     regionId = regionMap[region]["regionId"]
     itemIdsToQuery = ",".join(list(map(lambda invItem: str(inventory[invItem]["typeId"]), inventory)))
@@ -78,6 +79,11 @@ for region in regionMap:
         rawSellPrice = sell["fivePercent"]
         adjustedSellPrice = rawSellPrice * (1 - BROKER_RATE - SALES_TAX_RATE)
 
+        del buy["forQuery"]
+        del sell["forQuery"]
+        buy["typeId"] = typeId
+        sell["typeId"] = typeId
+
         acceptedRegionOffer = {}
         if adjustedSellPrice > adjustedBuyPrice:
             acceptedRegionOffer = sell
@@ -86,9 +92,13 @@ for region in regionMap:
             acceptedRegionOffer = buy
             acceptedRegionOffer["offerType"] = "Buy"
 
-        del acceptedRegionOffer["forQuery"]
-        acceptedRegionOffer["typeId"] = typeId
         offers[typeId][region] = acceptedRegionOffer
+
+        if "Jita" == region:
+            jitaOffers[typeId] = {
+                "buy": buy,
+                "sell": sell
+            }
 
 bestOffers = {k: [] for k in regionMap.keys()}
 for offer in offers:
@@ -110,10 +120,30 @@ for region in bestOffers:
 
     print(region)
 
-    tableData = [["Item Name", "Sell Type", "Price"]]
-    for offer in regionOffers:
-        # tableData.append([typeIdToNameDict[offer["typeId"]], offer["offerType"], "{:,.2f}".format(offer["fivePercent"])])
-        tableData.append([typeIdToNameDict[offer["typeId"]], offer["offerType"], offer["fivePercent"]])
+    doJitaComparison = "Jita" != region
 
-    print(tabulate.tabulate(tableData, headers="firstrow", tablefmt="github", floatfmt=",.2f"))
+    table = ["Item Name", "Sell Type", "Unit Price"]
+    if doJitaComparison:
+        table.append("Jita Buy")
+        table.append("Jita Sell")
+
+    table.append("Qty")
+    table.append("Estimated Price")
+    tableData = []
+    for offer in regionOffers:
+        typeId = offer["typeId"]
+        qty = inventory[typeId]["quantity"]
+        unitPrice = offer["fivePercent"]
+        row = [typeIdToNameDict[offer["typeId"]], offer["offerType"], unitPrice]
+        if doJitaComparison:
+            row.append(jitaOffers[typeId]["buy"]["fivePercent"])
+            row.append(jitaOffers[typeId]["sell"]["fivePercent"])
+        row.append(qty)
+        row.append(qty * unitPrice)
+        tableData.append(row)
+
+    tableData.sort(key=lambda row: row[-1], reverse=True)
+    # table.append(list(sorted(tableData, key=lambda row: row[4])))
+
+    print(tabulate.tabulate(tableData, table, tablefmt="github", floatfmt=",.2f"))
     print()
