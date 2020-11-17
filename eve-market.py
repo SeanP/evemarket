@@ -6,10 +6,13 @@ import sys
 import tabulate
 import tsv
 
-SALES_TAX_RATE = 0.05
 BROKER_RATE = 0.05
+REPROCESSING_EFFICIENCY = 0.5
+REPROCESSING_TAX_RATE = 0.05
+SALES_TAX_RATE = 0.05
 
 typeIdToNameDict = {}
+typeIdProperties = {}
 with open(os.path.dirname(os.path.abspath(__file__)) + os.path.sep + "invTypes.csv") as csvFile:
     csvReader = csv.DictReader(csvFile)
     for row in csvReader:
@@ -18,8 +21,35 @@ with open(os.path.dirname(os.path.abspath(__file__)) + os.path.sep + "invTypes.c
         except ValueError:
             continue
         typeIdToNameDict[typeId] = row["typeName"]
+        typeIdProperties[typeId] = {
+            "typeName": row["typeName"],
+            "portionSize": int(row["portionSize"]),
+        }
 
 nameToTypeIdDict = {v: k for k, v in typeIdToNameDict.items()}
+
+reprocessingOutputs = {}
+outputCount = {}
+with open(os.path.dirname(os.path.abspath(__file__)) + os.path.sep + "invTypeMaterials.csv") as csvFile:
+    csvReader = csv.DictReader(csvFile)
+    for row in csvReader:
+        try:
+            typeId = int(row["typeID"])
+            materialTypeId = int(row["materialTypeID"])
+            quantity = int(row["quantity"])
+        except ValueError:
+            continue
+
+        if typeId not in reprocessingOutputs:
+            reprocessingOutputs[typeId] = {}
+        reprocessingOutputs[typeId][materialTypeId] = quantity / typeIdProperties[typeId]["portionSize"]
+
+        try:
+            outputCount[materialTypeId] += 1
+        except KeyError:
+            outputCount[materialTypeId] = 1
+
+reprocessOutputsToConsider = list(map(lambda tuple: str(tuple[0]), filter(lambda tuple: tuple[1] > 200, outputCount.items())))
 
 inventory = {}
 invReader = tsv.TsvReader(sys.stdin)
@@ -54,12 +84,14 @@ regionMap = {
 
 regionIdMap = {v["regionId"]: k for k, v in regionMap.items()}
 
+eveMarketerUriBase = "https://api.evemarketer.com/ec/marketstat/json?typeid={}&regionlimit={}"
+
 offers = {}
 jitaOffers = {}
 for region in regionMap:
     regionId = regionMap[region]["regionId"]
     itemIdsToQuery = ",".join(list(map(lambda invItem: str(inventory[invItem]["typeId"]), inventory)))
-    uri = "https://api.evemarketer.com/ec/marketstat/json?typeid={}&regionlimit={}".format(itemIdsToQuery, regionId)
+    uri = eveMarketerUriBase.format(itemIdsToQuery, regionId)
 
     r = requests.get(uri)
     if r.status_code != 200:
@@ -100,7 +132,45 @@ for region in regionMap:
                 "sell": sell
             }
 
+reprocessUri = eveMarketerUriBase.format(",".join(reprocessOutputsToConsider), regionMap["Jita"]["regionId"])
+r = requests.get(reprocessUri)
+if r.status_code != 200:
+    raise ValueError("Non-200 error code {} for Jita Reprocessing".format(r.status_code))
+
+response = r.json()
+
+reprocessPrices = {}
+for offerPair in response:
+    buy = offerPair["buy"]
+    sell = offerPair["sell"]
+    typeId = int(buy["forQuery"]["types"][0])
+
+    averagePrice = 0.5 * buy["fivePercent"] + 0.5 * sell["fivePercent"]
+
+    reprocessPrices[typeId] = averagePrice
+
+reprocessOffers = {}
+for typeId in inventory.keys():
+    reprocessValue = 0
+    if typeId not in reprocessingOutputs:
+        continue
+    for materialTypeId in reprocessingOutputs[typeId].keys():
+        try:
+            unitPrice = reprocessPrices[materialTypeId]
+        except KeyError:
+            continue
+
+        reprocessValue += (1 - REPROCESSING_TAX_RATE) * REPROCESSING_EFFICIENCY * unitPrice * reprocessingOutputs[typeId][materialTypeId]
+
+    reprocessOffers[typeId] = reprocessValue
+    # offers[typeId] = {
+    #     "fivePercent": reprocessValue,
+    #     "offerType": "Reprocess",
+    #     "typeId": typeId,
+    # }
+
 bestOffers = {k: [] for k in regionMap.keys()}
+# bestOffers["Reprocess"] = []
 for offer in offers:
     bestRegion = ""
     bestPrice = -1.00
@@ -127,6 +197,7 @@ for region in bestOffers:
         table.append("Jita Buy")
         table.append("Jita Sell")
 
+    table.append("Reprocess Value")
     table.append("Qty")
     table.append("Estimated Price")
     tableData = []
@@ -138,6 +209,10 @@ for region in bestOffers:
         if doJitaComparison:
             row.append(jitaOffers[typeId]["buy"]["fivePercent"])
             row.append(jitaOffers[typeId]["sell"]["fivePercent"])
+        try:
+            row.append(reprocessOffers[typeId])
+        except KeyError:
+            row.append(None)
         row.append(qty)
         row.append(qty * unitPrice)
         tableData.append(row)
