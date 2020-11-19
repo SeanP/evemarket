@@ -7,6 +7,8 @@ import sys
 import tabulate
 import tsv
 
+from catalog.catalog import Item
+
 BROKER_RATE = 0.05
 REPROCESSING_EFFICIENCY = 0.5
 REPROCESSING_TAX_RATE = 0.05
@@ -19,7 +21,7 @@ def getJsonFromEsi(dataMap):
     uri = ESI_MARKET_HISTORY_URI.format_map(dataMap)
     r = esiSession.get(uri)
     if 200 != r.status_code:
-        raise ValueError("Non-200 error code {} from ESI for ".format(r.status_code, uri))
+        raise ValueError("Non-200 error code {} from ESI for {}".format(r.status_code, uri))
 
     return r.json()
 
@@ -29,8 +31,7 @@ def getFiveDayAverage(data):
 def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
 
-typeIdToNameDict = {}
-typeIdProperties = {}
+items = []
 with open(os.path.dirname(os.path.abspath(__file__)) + os.path.sep + "invTypes.csv") as csvFile:
     csvReader = csv.DictReader(csvFile)
     for row in csvReader:
@@ -38,15 +39,11 @@ with open(os.path.dirname(os.path.abspath(__file__)) + os.path.sep + "invTypes.c
             typeId = int(row["typeID"])
         except ValueError:
             continue
-        typeIdToNameDict[typeId] = row["typeName"]
-        typeIdProperties[typeId] = {
-            "typeName": row["typeName"],
-            "portionSize": int(row["portionSize"]),
-        }
+        items.append(Item(typeId=typeId, enUsName=row["typeName"], portionSize=int(row["portionSize"])))
 
-nameToTypeIdDict = {v: k for k, v in typeIdToNameDict.items()}
+typeIdToItem = {item.typeId: item for item in items}
+nameToItem = {item.name: item for item in items}
 
-reprocessingOutputs = {}
 outputCount = {}
 with open(os.path.dirname(os.path.abspath(__file__)) + os.path.sep + "invTypeMaterials.csv") as csvFile:
     csvReader = csv.DictReader(csvFile)
@@ -58,9 +55,7 @@ with open(os.path.dirname(os.path.abspath(__file__)) + os.path.sep + "invTypeMat
         except ValueError:
             continue
 
-        if typeId not in reprocessingOutputs:
-            reprocessingOutputs[typeId] = {}
-        reprocessingOutputs[typeId][materialTypeId] = quantity / typeIdProperties[typeId]["portionSize"]
+        typeIdToItem[typeId].addReprocessingOutputs(materialTypeId, quantity)
 
         try:
             outputCount[materialTypeId] += 1
@@ -73,14 +68,15 @@ inventory = {}
 invReader = tsv.TsvReader(sys.stdin)
 for rawRow in invReader:
     row = list(rawRow)
-    typeId = nameToTypeIdDict[row[0]]
-    inventory[typeId] = {
-        "typeId": nameToTypeIdDict[row[0]],
-        "quantity": int(row[1])
-    }
-
-if len(inventory) > 200:
-    raise ValueError("Inventory size of {} is more than 200. Reduce input size or implement batching.".format(len(inventory)))
+    item = nameToItem[row[0]]
+    quantity = int(row[1].replace(",", ""))
+    if item.typeId not in inventory:
+        inventory[item.typeId] = {
+            "quantity": quantity,
+            "item": item
+        }
+    else:
+        inventory[item.typeId]["quantity"] += quantity
 
 regionMap = {
     "Jita": {
@@ -110,6 +106,7 @@ for region in regionMap:
     regionId = regionMap[region]["regionId"]
 
     for typeId in inventory.keys():
+        item = typeIdToItem[typeId]
         response = getJsonFromEsi({
             "regionId": regionId,
             "typeId": typeId
@@ -117,8 +114,8 @@ for region in regionMap:
         try:
             fiveDayAverage = getFiveDayAverage(response)
         except statistics.StatisticsError:
-            eprint("Failed to process {typeId} in {region}. Continuing.".format_map({
-                "typeId": typeId,
+            eprint("Failed to process '{typeId}' in {region}. Continuing.".format_map({
+                "typeId": item.name,
                 "region": region
             }))
             continue
@@ -127,7 +124,7 @@ for region in regionMap:
             offers[typeId] = {}
 
         offers[typeId][region] = {
-            "typeId": typeId,
+            "item": item,
             "price": fiveDayAverage,
         }
 
@@ -147,15 +144,16 @@ for typeId in reprocessOutputsToConsider:
 reprocessOffers = {}
 for typeId in inventory.keys():
     reprocessValue = 0
-    if typeId not in reprocessingOutputs:
+    item = typeIdToItem[typeId]
+    if 0 == len(item.reprocessingOutputs):
         continue
-    for materialTypeId in reprocessingOutputs[typeId].keys():
+    for materialTypeId in item.reprocessingOutputs.keys():
         try:
             unitPrice = reprocessPrices[materialTypeId]
         except KeyError:
             continue
 
-        reprocessValue += (1 - REPROCESSING_TAX_RATE) * REPROCESSING_EFFICIENCY * unitPrice * reprocessingOutputs[typeId][materialTypeId]
+        reprocessValue += (1 - REPROCESSING_TAX_RATE) * REPROCESSING_EFFICIENCY * unitPrice * item.reprocessingOutputs[materialTypeId]
 
     reprocessOffers[typeId] = reprocessValue
 
@@ -191,10 +189,11 @@ for region in bestOffers:
     table.append("Estimated Price")
     tableData = []
     for offer in regionOffers:
-        typeId = offer["typeId"]
+        item = offer["item"]
+        typeId = item.typeId
         qty = inventory[typeId]["quantity"]
         unitPrice = offer["price"]
-        row = [typeIdToNameDict[offer["typeId"]], unitPrice]
+        row = [item.name, unitPrice]
         if doJitaComparison:
             row.append(jitaOffers[typeId])
         try:
@@ -206,7 +205,6 @@ for region in bestOffers:
         tableData.append(row)
 
     tableData.sort(key=lambda row: row[-1], reverse=True)
-    # table.append(list(sorted(tableData, key=lambda row: row[4])))
 
     print(tabulate.tabulate(tableData, table, tablefmt="github", floatfmt=",.2f"))
     print()
