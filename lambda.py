@@ -36,8 +36,6 @@ def enact(event, context):
 
         for region in tables.keys():
             table = tables[region]
-            print(region)
-            print(table["format"])
             body +='<h2>{}</h2>'.format(region)
             body += '<table class="table table-striped">'
             body += '<thead class="thead-dark">'
@@ -48,10 +46,8 @@ def enact(event, context):
             body += '</thead>'
             body += '<tbody>'
             for row in table["data"]:
-                print(row)
                 body += '<tr>'
                 for cellIdx in range(len(row)):
-                    print(cellIdx)
                     body += '<td>'
                     if None != row[cellIdx]:
                         body += table["format"][cellIdx].format(row[cellIdx])

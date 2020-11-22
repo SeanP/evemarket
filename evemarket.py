@@ -1,10 +1,13 @@
 #!/usr/bin/python3
+import asyncio
 import csv
+import httpx
+import json
 import os
-import requests
 import statistics
 import sys
 import tabulate
+import time
 import tsv
 
 from catalog.catalog import Item
@@ -15,24 +18,33 @@ REPROCESSING_TAX_RATE = 0.05
 SALES_TAX_RATE = 0.05
 
 ESI_MARKET_HISTORY_URI = "https://esi.evetech.net/latest/markets/{regionId}/history/?datasource=tranquility&type_id={typeId}"
-esiSession = requests.Session()
 
-def getJsonFromEsi(dataMap):
-    uri = ESI_MARKET_HISTORY_URI.format_map(dataMap)
-    r = esiSession.get(uri)
-    if 200 != r.status_code:
-        raise ValueError("Non-200 error code {} from ESI for {}".format(r.status_code, uri))
+regionMap = {
+    "Jita": {
+        "regionId": 10000002,
+    },
+    "Rens": {
+        "regionId": 10000030,
+    },
+    "Hek": {
+        "regionId": 10000042,
+    },
+    # "Amarr": {
+    #     "regionId": 10000043,
+    # },
+    # "Dodixie": {
+    #     "regionId": 10000032,
+    # },
+}
 
-    return r.json()
+items = []
+nameToItem = {}
+typeIdToItem = {}
 
-def getFiveDayAverage(data):
-    return statistics.mean(map(lambda priceDict: priceDict["average"], data[-5:]))
-
-def eprint(*args, **kwargs):
-    print(*args, file=sys.stderr, **kwargs)
-
-def doTheThing(inputStream):
-    items = []
+def initializeItems():
+    start = time.time()
+    if 0 < len(items):
+        return
     with open(os.path.dirname(os.path.abspath(__file__)) + os.path.sep + "invTypes.csv") as csvFile:
         csvReader = csv.DictReader(csvFile)
         for row in csvReader:
@@ -42,10 +54,10 @@ def doTheThing(inputStream):
                 continue
             items.append(Item(typeId=typeId, enUsName=row["typeName"], portionSize=int(row["portionSize"])))
 
-    typeIdToItem = {item.typeId: item for item in items}
-    nameToItem = {item.name: item for item in items}
+    for item in items:
+        typeIdToItem[item.typeId] = item
+        nameToItem[item.name] = item
 
-    outputCount = {}
     with open(os.path.dirname(os.path.abspath(__file__)) + os.path.sep + "invTypeMaterials.csv") as csvFile:
         csvReader = csv.DictReader(csvFile)
         for row in csvReader:
@@ -58,12 +70,40 @@ def doTheThing(inputStream):
 
             typeIdToItem[typeId].addReprocessingOutputs(materialTypeId, quantity)
 
-            try:
-                outputCount[materialTypeId] += 1
-            except KeyError:
-                outputCount[materialTypeId] = 1
+    print("Init SDE time: {:.3f} s".format(time.time() - start))
 
-    reprocessOutputsToConsider = list(map(lambda tuple: tuple[0], filter(lambda tuple: tuple[1] > 200, outputCount.items())))
+async def getJsonFromEsi(client, regionId, typeId, orderHistory):
+    uri = ESI_MARKET_HISTORY_URI.format_map({
+        "regionId": regionId,
+        "typeId": typeId
+    })
+    r = await client.get(uri)
+    if 200 != r.status_code:
+        raise ValueError("Non-200 error code {} from ESI for {}".format(r.status_code, uri))
+
+    orderHistory[regionId][typeId] = r.json()
+
+def runBatch(requestMap):
+    orderHistory = {}
+    client = httpx.AsyncClient()
+    loop = asyncio.get_event_loop()
+    tasks = []
+    for regionId in requestMap.keys():
+        orderHistory[regionId] = {}
+        for typeId in requestMap[regionId]:
+            tasks.append(loop.create_task(getJsonFromEsi(client=client, regionId=regionId, typeId=typeId, orderHistory=orderHistory)))
+    tasks.append(loop.create_task(client.aclose()))
+    loop.run_until_complete(asyncio.wait(tasks))
+    return orderHistory
+
+def getFiveDayAverage(data):
+    return statistics.mean(map(lambda priceDict: priceDict["average"], data[-5:]))
+
+def eprint(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
+
+def doTheThing(inputStream):
+    initializeItems()
 
     inventory = {}
     invReader = tsv.TsvReader(inputStream)
@@ -79,23 +119,31 @@ def doTheThing(inputStream):
         else:
             inventory[item.typeId]["quantity"] += quantity
 
-    regionMap = {
-        "Jita": {
-            "regionId": 10000002,
-        },
-        "Rens": {
-            "regionId": 10000030,
-        },
-        "Hek": {
-            "regionId": 10000042,
-        },
-        # "Amarr": {
-        #     "regionId": 10000043,
-        # },
-        # "Dodixie": {
-        #     "regionId": 10000032,
-        # },
-    }
+    reprocessOutputsToConsider = set()
+
+    for invItem in inventory.values():
+        for materialTypeId in invItem["item"].reprocessingOutputs.keys():
+            reprocessOutputsToConsider.add(materialTypeId)
+
+    # Prefetch everything
+    requestMap = {}
+    for materialTypeId in reprocessOutputsToConsider:
+        jitaRegion = regionMap["Jita"]["regionId"]
+        try:
+            requestMap[jitaRegion].add(materialTypeId)
+        except KeyError:
+            requestMap[jitaRegion] = {materialTypeId}
+
+    for regionId in map(lambda region: region["regionId"], regionMap.values()):
+        for itemId in inventory.keys():
+            try:
+                requestMap[regionId].add(itemId)
+            except KeyError:
+                requestMap[regionId] = {itemId}
+
+    start = time.time()
+    orderHistory = runBatch(requestMap)
+    print("Offer retrieval time: {}".format(time.time() - start))
 
     offers = {}
     jitaOffers = {}
@@ -104,10 +152,7 @@ def doTheThing(inputStream):
 
         for typeId in inventory.keys():
             item = typeIdToItem[typeId]
-            response = getJsonFromEsi({
-                "regionId": regionId,
-                "typeId": typeId
-            })
+            response = orderHistory[regionId][typeId]
             try:
                 fiveDayAverage = getFiveDayAverage(response)
             except statistics.StatisticsError:
@@ -131,10 +176,7 @@ def doTheThing(inputStream):
     reprocessPrices = {}
 
     for typeId in reprocessOutputsToConsider:
-        response = getJsonFromEsi({
-            "regionId": regionMap["Jita"]["regionId"],
-            "typeId": typeId
-        })
+        response = orderHistory[regionMap["Jita"]["regionId"]][typeId]
         fiveDayAverage = getFiveDayAverage(response)
         reprocessPrices[typeId] = fiveDayAverage
 
@@ -213,3 +255,11 @@ def doTheThing(inputStream):
             'format': columnFormatString
         }
     return results
+
+
+def main():
+    results = doTheThing(sys.stdin)
+    print(json.dumps(results))
+
+if __name__ == "__main__":
+    main()
