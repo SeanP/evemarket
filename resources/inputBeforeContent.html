@@ -1,0 +1,14 @@
+<h1>Input</h1>
+<p>
+    Grab the items you want to sell from your Eve client and drop them in the
+    box below. You can use <span class="text-monospace">Shift ⇧</span> to
+    select a range of items or <span class="text-monospace">Ctrl</span> to pick
+    individual items. Once you've selected what you want to liquidate, hit
+    <span class="text-monospace">Ctrl</span> +
+    <span class="text-monospace">C</span> to copy to your clipboard, then just
+    paste in the input below.
+</p>
+<form action="evemarket" method="POST">
+    <div class="form-group">
+        <label for="inventory">Inventory:</label>
+        <textarea class="form-control text-monospace" type="text" id="inventory" name="user_inventory" rows="10">
