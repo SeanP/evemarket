@@ -29,12 +29,12 @@ regionMap = {
     "Hek": {
         "regionId": 10000042,
     },
-    # "Amarr": {
-    #     "regionId": 10000043,
-    # },
-    # "Dodixie": {
-    #     "regionId": 10000032,
-    # },
+    "Amarr": {
+        "regionId": 10000043,
+    },
+    "Dodixie": {
+        "regionId": 10000032,
+    },
 }
 
 items = []
@@ -102,7 +102,7 @@ def getFiveDayAverage(data):
 def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
 
-def doTheThing(inputStream):
+def doTheThing(inputStream, regionsToCheck=["Jita", "Hek", "Rens"]):
     initializeItems()
 
     inventory = {}
@@ -134,7 +134,8 @@ def doTheThing(inputStream):
         except KeyError:
             requestMap[jitaRegion] = {materialTypeId}
 
-    for regionId in map(lambda region: region["regionId"], regionMap.values()):
+    # for regionId in map(lambda region: region["regionId"], regionMap.values()):
+    for regionId in map(lambda region: regionMap[region]["regionId"], regionsToCheck):
         for itemId in inventory.keys():
             try:
                 requestMap[regionId].add(itemId)
@@ -147,7 +148,7 @@ def doTheThing(inputStream):
 
     offers = {}
     jitaOffers = {}
-    for region in regionMap:
+    for region in regionsToCheck:
         regionId = regionMap[region]["regionId"]
 
         for typeId in inventory.keys():
@@ -197,7 +198,7 @@ def doTheThing(inputStream):
         reprocessOffers[typeId] = reprocessValue
 
 
-    bestOffers = {k: [] for k in regionMap.keys()}
+    bestOffers = {k: [] for k in regionsToCheck}
     for typeId in offers:
         bestRegion = ""
         bestPrice = -1.00
